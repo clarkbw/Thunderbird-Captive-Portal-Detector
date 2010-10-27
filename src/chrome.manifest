@@ -1,0 +1,6 @@
+content   CaptivePortalDetector                 chrome/content/
+resource  CaptivePortalDetector                 modules/
+skin      CaptivePortalDetector   classic/1.0   chrome/skin/
+locale    CaptivePortalDetector   en-US         chrome/locale/en-US/
+
+overlay   chrome://messenger/content/mailWindowOverlay.xul chrome://CaptivePortalDetector/content/thunderbird.xul

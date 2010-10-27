@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RDF xmlns="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:em="http://www.mozilla.org/2004/em-rdf#">
+  <Description about="urn:mozilla:install-manifest">
+    <em:id>tbcaptiveportaldetector@momo</em:id>
+    <em:type>2</em:type>
+    <em:name>Thunderbird Hotel and Airport Networker</em:name>
+    <em:version>0.1</em:version>
+    <em:creator>Bryan Clark</em:creator>
+    <em:contributor></em:contributor>
+    <em:description>Detects wireless and wired portal redirects that happen when you need to log into a hotel or airport network.</em:description>
+    <em:aboutURL>chrome://CaptivePortalDetector/content/about.xul</em:aboutURL>
+    <em:targetApplication>
+      <Description>
+        <em:id>{3550f703-e582-4d05-9a08-453d09bdfdc6}</em:id> <!-- Thunderbird -->
+        <em:minVersion>3.1</em:minVersion>
+        <em:maxVersion>3.3a1pre</em:maxVersion>
+      </Description>
+    </em:targetApplication>
+  </Description>
+</RDF>

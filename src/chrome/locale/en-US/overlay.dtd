@@ -1,0 +1,8 @@
+<!ENTITY CaptivePortalDetector.label "Your localized menuitem">
+<!ENTITY CaptivePortalDetectorContext.label "Your Menuitem">
+<!ENTITY CaptivePortalDetectorContext.accesskey "Y">
+<!ENTITY CaptivePortalDetectorToolbarButton.label "Your Toolbar Button">
+<!ENTITY CaptivePortalDetectorToolbarButton.tooltip "This is your toolbar button!">
+<!ENTITY CaptivePortalDetectorSidebar.label "Your Sidebar">
+<!ENTITY CaptivePortalDetectorToolbar.name  "example">
+<!ENTITY CaptivePortalDetectorToolbar.label "This is an example toolbar. You can hide it under View &gt; toolbars &gt; &CaptivePortalDetectorToolbar.name;">
