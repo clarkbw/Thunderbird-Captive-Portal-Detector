@@ -1,68 +1,63 @@
 var EXPORTED_SYMBOLS = ["CaptivePortalHandlerFactory"];
 
-const DEBUG = true;
-
 Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
 
 const Cc = Components.classes;
 const Ci = Components.interfaces;
 const Cr = Components.results;
 
+/* Older versions of XPCOMUtils aren't as lazy as the newer ones */
+
+if (typeof XPCOMUtils.defineLazyServiceGetter !== "function") {
+  XPCOMUtils.defineLazyServiceGetter = function(aObject, aName,
+                                                aContract, aInterfaceName) {
+    XPCOMUtils.defineLazyGetter(aObject, aName, function XPCU_serviceLambda() {
+      return Cc[aContract].getService(Ci[aInterfaceName]);
+    });
+  };
+}
+
 var gCaptivePortalHandler = null;
 
-function CaptivePortalHandlerFactory() {
+function CaptivePortalHandlerFactory(aTabMail, aURL) {
   if (gCaptivePortalHandler === null)
-    gCaptivePortalHandler = new CaptivePortalHandler();
+    gCaptivePortalHandler = new CaptivePortalHandler(aTabMail, aURL);
   return gCaptivePortalHandler;
 }
 
 /*
- * 
+ * This module handles our checking for a certain URL which cannot have a redirect
+ * If the given URL does redirect when going online or at first load our module
+ * assumes we're being captured by a login portal and opens the redirected page
+ * in a tab for the user to login or accept a TOS
  */
-function CaptivePortalHandler() { }
+function CaptivePortalHandler(aTabMail, aURL) {
+  this.mTabMail = aTabMail;
+  this.mURL = aURL;
+
+  XPCOMUtils.defineLazyServiceGetter(this, "mIO",
+                                     "@mozilla.org/network/io-service;1",
+                                     "nsIIOService");
+
+  XPCOMUtils.defineLazyServiceGetter(this, "mOS",
+                                     "@mozilla.org/observer-service;1",
+                                     "nsIObserverService");
+
+}
+
 CaptivePortalHandler.prototype = {
   log: function cph_log(msg) {
-      dump("CaptivePortalHandler: " + msg);
+      dump("CaptivePortalHandler: " + msg + "\n");
   },
 
-  initialized : -1,
+  initialized : false,
 
-  channel : null,
+  onLoad: function cph_onload() {
+    this.log("onLoad " + this.initialized);
 
-  URI : null,
-
-  CHECK_URL : "http://clarkbw.net/lib/index.html",
-
-  // For debug purposes only (this page does not exist)
-  DEBUG_REDIRECTING_URL : "http://clarkbw.net/lib/redirect.html",
-
-  get mOS() {
-    delete this._mOS;
-    return this._mOS = Cc["@mozilla.org/observer-service;1"]
-                        .getService(Ci.nsIObserverService);
-  },
-
-  get mIO() {
-    delete this._mIO;
-    return this._mIO = Cc["@mozilla.org/network/io-service;1"]
-                        .getService(Ci.nsIIOService);
-  },
-
-  onLoad: function cph_onload(aCallback) {
-    gCaptivePortalHandler.initialized++;
-    this.log("onLoad " + gCaptivePortalHandler.initialized);
-    this.mCallback = aCallback;
-
-    //aTabBrowser.tabContainer.addEventListener('SSTabRestoring', this, false);
-
-    if (gCaptivePortalHandler.initialized == 0) {
-      if (DEBUG)
-        this.URI = this.mIO.newURI(this.DEBUG_REDIRECTING_URL, null, null);
-      else
-        this.URI = this.mIO.newURI(this.CHECK_URL, null, null);
-
-      this.log("this.URI: " + this.URI.spec);
-      
+    if (!this.initialized) {
+      this.initialized = true;
+      this.log("this.mURL: " + this.mURL);
       this.mOS.addObserver(gCaptivePortalHandler, "network:offline-status-changed", true);
       this.mOS.addObserver(gCaptivePortalHandler, "quit-application", true);
     }
@@ -77,22 +72,22 @@ CaptivePortalHandler.prototype = {
 
   // Check for the right network connection without a redirect
   detectCaptivePortal: function cph_detectcaptiveportal() {
-    //this.log("this is wrong: " + JSON.stringify(this));
-    if (this.channel == null) {
-      this.log("channel is " + this.channel);
-      // get a channel for the nsIURI
-      this.channel = this.mIO.newChannelFromURI(this.URI);
-  
-      this.channel.notificationCallbacks = this;
-      this.channel.asyncOpen(this, null);
-      this.log("channel is " + this.channel);
-    } else
-      this.log("else - channel is " + this.channel);
+    this.log("detectCaptivePortal");
+
+    var channel = this.mIO.newChannel(this.mURL, null, null);
+    channel.loadFlags = Ci.nsICachingChannel.LOAD_BYPASS_LOCAL_CACHE;
+
+    channel.notificationCallbacks = this;
+    channel.asyncOpen(this, null);
+
   },
 
-  openCaptivePortalTab: function cph_opencaptiveportaltab(aURI) {
-    this.log("openCaptivePortalTab: " + aURI.spec);
-    this.mCallback(aURI);
+  openCaptivePortalTab: function cph_opencaptiveportaltab(aOldURI, aNewURI) {
+    gCaptivePortalHandler.log("openCaptivePortalTab: " + aOldURI.spec + " : " + aNewURI.spec);
+    try {
+      gCaptivePortalHandler.mTabMail.openTab("captivePortalTab", { oldURIspec: aOldURI.spec,
+                                                                   newURIspec: aNewURI.spec });
+    } catch(e) { gCaptivePortalHandler.log("openCaptivePortalTab.error: " + e); }
   },
 
   /**
@@ -103,12 +98,12 @@ CaptivePortalHandler.prototype = {
       case "network:offline-status-changed":
         this.log("You went " + aData);
         if ("online" == aData) {
-          this.detectCaptivePortal();
+          this.detectCaptivePortal.call(gCaptivePortalHandler);
         }
         break;
 
       case "quit-application":
-        this.onUnload();
+        this.onUnload.call(gCaptivePortalHandler);
         break;
     }
   },
@@ -119,18 +114,21 @@ CaptivePortalHandler.prototype = {
   onDataAvailable: function (aRequest, aContext, aStream, aSourceOffset, aLength) { },
   onStopRequest: function (aRequest, aContext, aStatus) {
     gCaptivePortalHandler.log("onStopRequest");
-    gCaptivePortalHandler.channel = null;
   },
 
   // nsIChannelEventSink
   onChannelRedirect: function (aOldChannel, aNewChannel, aFlags) {
     // if redirecting, store the new channel
-    gCaptivePortalHandler.channel = aNewChannel;
-    if (gCaptivePortalHandler.URI == aOldChannel.URI &&
-        gCaptivePortalHandler.URI != aNewChannel.URI) {
-      this.openCaptivePortalTab.call(gCaptivePortalHandler, aNewChannel.URI);
+    if (gCaptivePortalHandler.mURL == aOldChannel.URI.spec &&
+        gCaptivePortalHandler.mURL != aNewChannel.URI.spec) {
+      gCaptivePortalHandler.openCaptivePortalTab.call(gCaptivePortalHandler, aOldChannel.URI, aNewChannel.URI);
     }
-    this.log("onChannelRedirect " + this.URI.spec + " == " + aOldChannel.URI.spec + " &&\n\t\t" + this.URI.spec + " != " + aNewChannel.URI.spec);
+  },
+  asyncOnChannelRedirect: function (aOldChannel, aNewChannel, aFlags, aCallback) {
+    if (gCaptivePortalHandler.mURL == aOldChannel.URI.spec &&
+        gCaptivePortalHandler.mURL != aNewChannel.URI.spec) {
+      gCaptivePortalHandler.openCaptivePortalTab.call(gCaptivePortalHandler, aOldChannel.URI, aNewChannel.URI);
+    }
   },
 
   // nsIHttpEventSink (called after onChannelRedirect)
