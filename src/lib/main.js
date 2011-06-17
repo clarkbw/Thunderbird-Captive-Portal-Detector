@@ -1,32 +1,101 @@
-Components.utils.import("resource://CaptivePortalDetector/handler.js");
+const {Cc, Ci, Cr} = require("chrome"),
+      winUtils = require("window-utils"),
+      obService = require("observer-service"),
+      prefs = require("preferences-service"),
 
-const DEBUG = false;
+      URL_PREF = "extensions." + require("self").id + ".url",
+      URL = "http://clarkbw.net/lib/index.html",
 
-let CaptivePortalDetector = {
-  CHECK_URL : "http://clarkbw.net/lib/index.html",
+      MAIL_3PANE = "mail:3pane",
+      NETWORK_STATUS_CHANGED = "network:offline-status-changed",
+      NETWORK_STATUS_ONLINE = "online",
 
-  // For debug purposes only (this page does not exist)
-  DEBUG_REDIRECTING_URL : "http://clarkbw.net/lib/redirect.html",
+      CAPTIVE_PORTAL_STATUS = "network:captive-portal-status-changed",
+      CAPTIVE_PORTAL_ACTIVE = "active";
 
-  log: function cpd_log(msg) {
-    Application.console.log("CaptivePortalDetector: " + msg);
-  },
-
-  onLoad: function cpd_onload() {
-    let tabmail = document.getElementById("tabmail");
-    // we need to make sure that tabmail is ready to be used
-    if (!tabmail) { return; }
-    try {
-      let url = (DEBUG)? this.DEBUG_REDIRECTING_URL : this.CHECK_URL;
-      tabmail.registerTabType(CaptivePortalTabType);
-      let CaptivePortalHandler = CaptivePortalHandlerFactory(tabmail, url);
-      CaptivePortalHandler.onLoad();
-    } catch (e) { this.log("onLoad.error: " + e); }
+exports.main = function (options, callbacks) {
+  if (!prefs.isSet(URL_PREF)) {
+    prefs.set(URL_PREF, URL);
   }
 
+  var windowTracker = new winUtils.WindowTracker(mailWindowManager);
+  require("unload").ensure(windowTracker);
+  obService.add(NETWORK_STATUS_CHANGED, networkStatusObserver);
 };
 
-var CaptivePortalTabType = {
+exports.onUnload = function (reason) {
+  obService.remove(NETWORK_STATUS_CHANGED, networkStatusObserver);
+};
+
+function isMail3PaneWindow(win) {
+  let winType = win.document.documentElement.getAttribute("windowtype");
+  return winType === MAIL_3PANE;
+}
+
+/**
+ * Watches the "network:offline-status-changed" topic for the "online" subject
+ * event and tries to open the portal detector using exports.openPortalDetector
+ */
+var networkStatusObserver = {
+  observe: function networkStatusObserver_observe(aSubject, aTopic, aData) {
+    switch (aTopic) {
+      case NETWORK_STATUS_CHANGED:
+        if (NETWORK_STATUS_ONLINE === aData) {
+          for (window in winUtils.windowIterator()) {
+            if (isMail3PaneWindow(window)) {
+              openPortalDetector(window.document);
+            }
+          }
+        }
+        break;
+    }
+  }
+};
+
+/**
+ * Window watcher object (will attach to all windows, even pref windows)
+ * Attaches buttons to new windows and removes them when they disappear
+ */
+var mailWindowManager = {
+  onTrack: function mailWindowManager_onTrack(window) {
+    if (isMail3PaneWindow(window)) {
+      registerTabType(window.document);
+      openPortalDetector(window.document);
+      //console.log("tracking window");
+    }
+  },
+  onUntrack: function mailWindowManager_onUntrack(window) {
+    if (isMail3PaneWindow(window)) {
+      //console.log("Untracking a window: " + window.document);
+    }
+  }
+};
+
+function registerTabType(document) {
+  //console.log("registerTabType");
+  try {
+    document.getElementById('tabmail').registerTabType(new CaptivePortalTabType(document));
+  } catch(e) {
+    console.log("error : " + e);
+  }
+}
+
+function openPortalDetector(document) {
+  //console.log("openPortalDetector");
+  try {
+    document.getElementById('tabmail').openTab("captivePortalTab",
+                                               { "contentPage"  : prefs.get(URL_PREF)});
+  } catch(e) {
+    console.log("error : " + e);
+  }
+}
+
+function CaptivePortalTabType(document) {
+  this.mDoc = document;
+  //console.log("CaptivePortalTabType");
+}
+
+CaptivePortalTabType.prototype = {
   name: "captivePortalTab",
   perTabPanel: "vbox",
 
@@ -37,7 +106,7 @@ var CaptivePortalTabType = {
     }
   },
   shouldSwitchTo: function onSwitchTo() {
-    let tabmail = document.getElementById("tabmail");
+    let tabmail = this.mDoc.getElementById("tabmail");
     let tabInfo = tabmail.tabInfo;
 
     for (let selectedIndex = 0; selectedIndex < tabInfo.length;
@@ -49,21 +118,30 @@ var CaptivePortalTabType = {
     return -1;
   },
   openTab: function onTabOpened(aTab, aArgs) {
-    if (!"oldURIspec" in aArgs && !"newURIspec" in aArgs)
-      throw("oldURIspec and newURIspec must be specified");
+    if (!"contentPage" in aArgs)
+      throw("contentPage must be specified");
+
+    //console.log("CaptivePortalTabType.openTab(" + aArgs.contentPage + ")");
 
     // First clone the page and set up the basics.
-    let clone = document.getElementById("contentTab").firstChild.cloneNode(true);
+    let clone = this.mDoc.getElementById("contentTab").firstChild.cloneNode(true);
 
     clone.setAttribute("id", "captivePortalTab");
-    clone.setAttribute("collapsed", false);
 
+    // Ensure that our tab panel doesn't show any content until it's loaded
+    clone.setAttribute("collapsed", true);
+
+    // Ensure that our tab is not visible at first
+    aTab.tabNode.setAttribute("collapsed", true);
+
+    aTab.clone = clone;
     aTab.panel.appendChild(clone);
 
     // Start setting up the browser.
     aTab.browser = aTab.panel.getElementsByTagName("browser")[0];
 
-    aTab.browser.setAttribute("type", "content-primary");
+    // Open as a background tab by default
+    aTab.browser.setAttribute("type", "content-targetable");
 
     aTab.browser.setAttribute("id", "captivePortalTabBrowser");
 
@@ -76,24 +154,24 @@ var CaptivePortalTabType = {
                               "captivePortalTabBrowser");
 
     // Default to reload being disabled.
-    aTab.reloadEnabled = false;
+    aTab.reloadEnabled = true;
 
     // Now set up the listeners.
-    this._setUpTitleListener(aTab);
-    this._setUpCloseWindowListener(aTab);
+    this._setUpTitleListener(aTab, this.mDoc);
+    this._setUpCloseWindowListener(aTab, this.mDoc);
 
     // Create a filter and hook it up to our browser
-    let filter = Components.classes["@mozilla.org/appshell/component/browser-status-filter;1"]
-                           .createInstance(Components.interfaces.nsIWebProgress);
+    let filter = Cc["@mozilla.org/appshell/component/browser-status-filter;1"]
+                           .createInstance(Ci.nsIWebProgress);
     aTab.filter = filter;
-    aTab.browser.webProgress.addProgressListener(filter, Components.interfaces.nsIWebProgress.NOTIFY_ALL);
+    aTab.browser.webProgress.addProgressListener(filter, Ci.nsIWebProgress.NOTIFY_ALL);
 
     // Wire up a progress listener to the filter for this browser
-    aTab.progressListener = new CaptivePortalDetectorTabListener(aTab, aArgs.oldURIspec);
+    aTab.progressListener = new CaptivePortalDetectorTabListener(aTab, aArgs.contentPage, this.mDoc);
 
-    filter.addProgressListener(aTab.progressListener, Components.interfaces.nsIWebProgress.NOTIFY_ALL);
+    filter.addProgressListener(aTab.progressListener, Ci.nsIWebProgress.NOTIFY_ALL);
 
-    aTab.browser.loadURI(aArgs.newURIspec);
+    aTab.browser.loadURI(aArgs.contentPage);
 
   },
   closeTab: function onTabClosed(aTab) {
@@ -202,10 +280,10 @@ var CaptivePortalTabType = {
     return aTab.browser;
   },
   // Internal function used to set up the title listener on a content tab.
-  _setUpTitleListener: function setUpTitleListener(aTab) {
+  _setUpTitleListener: function setUpTitleListener(aTab, doc) {
     function onDOMTitleChanged(aEvent) {
       aTab.title = aTab.browser.contentTitle;
-      document.getElementById("tabmail").setTabTitle(aTab);
+      doc.getElementById("tabmail").setTabTitle(aTab);
     }
     // Save the function we'll use as listener so we can remove it later.
     aTab.titleListener = onDOMTitleChanged;
@@ -217,14 +295,14 @@ var CaptivePortalTabType = {
    * Internal function used to set up the close window listener on a content
    * tab.
    */
-  _setUpCloseWindowListener: function setUpCloseWindowListener(aTab) {
+  _setUpCloseWindowListener: function setUpCloseWindowListener(aTab, doc) {
     function onDOMWindowClose(aEvent) {
       if (!aEvent.isTrusted)
         return;
 
       // Redirect any window.close events to closing the tab. As a 3-pane tab
       // must be open, we don't need to worry about being the last tab open.
-      document.getElementById("tabmail").closeTab(aTab);
+      doc.getElementById("tabmail").closeTab(aTab);
       aEvent.preventDefault();
     }
     // Save the function we'll use as listener so we can remove it later.
@@ -235,9 +313,12 @@ var CaptivePortalTabType = {
   }
 };
 
-function CaptivePortalDetectorTabListener(aTab, aURL) {
+function CaptivePortalDetectorTabListener(aTab, aURL, aDoc) {
     this.mTab = aTab;
     this.mURL = aURL;
+    this.mDoc = aDoc;
+
+    //console.log("CaptivePortalDetectorTabListener");
 }
 CaptivePortalDetectorTabListener.prototype = {
     onProgressChange: function tPL_onProgressChange(aWebProgress, aRequest,
@@ -245,6 +326,7 @@ CaptivePortalDetectorTabListener.prototype = {
                                                     aMaxSelfProgress,
                                                     aCurTotalProgress,
                                                     aMaxTotalProgress) {
+      //console.log("CaptivePortalDetectorTabListener.onProgressChange");
     },
     onProgressChange64: function tPL_onProgressChange64(aWebProgress, aRequest,
                                                         aCurSelfProgress,
@@ -254,27 +336,45 @@ CaptivePortalDetectorTabListener.prototype = {
     },
     onLocationChange: function tPL_onLocationChange(aWebProgress, aRequest,
                                                     aLocationURI) {
-      // I've we've been redirected to our original check url then just
+      // If we've been redirected to our original check url then just
       // close the tab automatically, otherwise people can figure it out
-      //dump("onLocationChange: " + this.mURL + " == " + aLocationURI.spec + "\n");
-      if (this.mURL == aLocationURI.spec)
-        document.getElementById("tabmail").closeTab(this.mTab);
+      //dump("CaptivePortalDetectorTabListener.onLocationChange: " + this.mURL + " == " + aLocationURI.spec + "\n");
+      if (this.mURL == aLocationURI.spec) {
+        this.mDoc.getElementById("tabmail").closeTab(this.mTab);
+      } else {
+        // Notify all observers that we've detected a captive portal
+        Cc["@mozilla.org/observer-service;1"].
+          getService(Ci.nsIObserverService).
+          notifyObservers(null, CAPTIVE_PORTAL_STATUS, CAPTIVE_PORTAL_ACTIVE);
+
+        // Show the tab
+        this.mTab.tabNode.setAttribute("collapsed", false);
+        // Show the panel
+        this.mTab.clone.setAttribute("collapsed", false);
+        // Bring to the front
+        this.mDoc.getElementById("tabmail").switchToTab(this.mTab);
+      }
     },
     onStateChange: function tPL_onStateChange(aWebProgress, aRequest, aStateFlags,
                                               aStatus) {
+      //console.log("CaptivePortalDetectorTabListener.onStateChange " + aRequest + " : " + aStateFlags);
     },
     onStatusChange: function tPL_onStatusChange(aWebProgress, aRequest, aStatus,
                                                 aMessage) {
+      //console.log("CaptivePortalDetectorTabListener.onStatusChange " + aStatus + " : " + aMessage);
     },
     onSecurityChange: function tPL_onSecurityChange(aWebProgress, aRequest,
                                                     aState) {
     },
     onRefreshAttempted: function tPL_OnRefreshAttempted(aWebProgress, aURI,
                                                         aDelay, aSameURI) {
+      //console.log("CaptivePortalDetectorTabListener.onRefreshAttempted " + aURI + " : " + aSameURI + " - " + aDelay);
     },
-    QueryInterface: XPCOMUtils.generateQI([Components.interfaces.nsIWebProgressListener,
-                                           Components.interfaces.nsIWebProgressListener2,
-                                           Components.interfaces.nsISupportsWeakReference])
+    QueryInterface: function(iid) {
+      if (iid.equals(Ci.nsIWebProgressListener) ||
+          iid.equals(Ci.nsIWebProgressListener2) ||
+          iid.equals(Ci.nsISupportsWeakReference))
+        return this;
+      throw Cr.NS_ERROR_NO_INTERFACE;
+    }
 }
-
-window.addEventListener("load",   function() CaptivePortalDetector.onLoad(),   false);
