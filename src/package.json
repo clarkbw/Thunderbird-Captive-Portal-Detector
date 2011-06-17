@@ -1,9 +1,10 @@
 {
-    "name": "tb-cpd", 
+    "name": "tb-captive-portal-detector", 
     "license": "MPL 1.1/GPL 2.0/LGPL 2.1", 
-    "author": "", 
+    "author": "Bryan W Clark",
+    "homepage" : "http://clarkbw.net/blog/",
     "version": "0.1", 
-    "fullName": "tb-cpd", 
+    "fullName": "Thunderbird Captive Portal detector", 
     "id": "jid1-CuEKsiBk2Kg10A", 
-    "description": "a basic add-on"
+    "description": "Looks for captive portals, like airport wifi logins, and opens a tab to help you connect to them."
 }
