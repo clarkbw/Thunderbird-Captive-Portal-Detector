@@ -1,77 +1,146 @@
-const main = require("main"),
-      winUtils = require("window-utils"),
-      {Cc,Ci} = require("chrome"),
+const {Cc,Ci} = require("chrome"),
       prefs = require("preferences-service"),
+      obService = require("observer-service"),
 
       URL_PREF = "extensions." + require("self").id + ".url",
       URL = "http://clarkbw.net/lib/index.html",
       DEBUG_REDIRECTING_URL = "http://clarkbw.net/lib/redirect.html",
+      DEBUG_301_REDIRECT_URL = "http://clarkbw.net/lib/test-301-redirect.html",
+      DEBUG_META_REDIRECT_URL = "http://clarkbw.net/lib/test-meta-redirect.html",
+      DEBUG_JS_REDIRECT_URL = "http://clarkbw.net/lib/test-js-redirect.html",
 
       MAIL_3PANE = "mail:3pane",
 
+      NETWORK_STATUS_CHANGED = "network:offline-status-changed",
+      NETWORK_STATUS_ONLINE = "online",
+      NETWORK_STATUS_OFFLINE = "offline",
+
       CAPTIVE_PORTAL_STATUS = "network:captive-portal-status-changed",
-      CAPTIVE_PORTAL_ACTIVE = "active";
+      CAPTIVE_PORTAL_ACTIVE = "active",
+      CAPTIVE_PORTAL_INACTIVE = "inactive";
 
-prefs.set(URL_PREF, DEBUG_REDIRECTING_URL);
-main.main();
+//function isMail3PaneWindow(win) {
+//  let winType = win.document.documentElement.getAttribute("windowtype");
+//  return winType === MAIL_3PANE;
+//}
 
-function isMail3PaneWindow(win) {
-  let winType = win.document.documentElement.getAttribute("windowtype");
-  return winType === MAIL_3PANE;
-}
 
 exports.test_id = function(test) {
   test.assert(require("self").id.length > 0);
 };
 
 exports.test_pref_set = function(test) {
-  test.assert(prefs.get(URL_PREF).length > 0);
+  var loader = test.makeSandboxedLoader();
+  prefs.set(URL_PREF, DEBUG_REDIRECTING_URL);
+  test.assert(prefs.get(URL_PREF) == DEBUG_REDIRECTING_URL);
 };
 
-exports.test_go_offline_online = function (test) {
+exports.test_redirects = function (test) {
   let offlineManager = Cc["@mozilla.org/messenger/offline-manager;1"].getService(Ci.nsIMsgOfflineManager);
-  let ioService = Cc["@mozilla.org/network/io-service;1"].getService(Ci.nsIIOService);
   let msgWindow = Cc["@mozilla.org/messenger/msgwindow;1"].createInstance(Ci.nsIMsgWindow);
+  let ioService = Cc["@mozilla.org/network/io-service;1"].getService(Ci.nsIIOService);
 
-  test.waitUntilDone(20000);
+  test.waitUntilDone(30000);
 
-  var observer = {
-                  observe: function networkStatusObserver_observe(aSubject, aTopic, aData) {
-                    switch (aTopic) {
-                      case CAPTIVE_PORTAL_STATUS:
-                        Cc["@mozilla.org/observer-service;1"].
-                          getService(Ci.nsIObserverService).
-                          removeObserver(observer, CAPTIVE_PORTAL_STATUS);
-                        if (CAPTIVE_PORTAL_ACTIVE === aData) {
-                          test.done();
-                        }
-                        break;
-                      }
-                  }
-                };
+  let redirects = 0;
 
-  Cc["@mozilla.org/observer-service;1"].
-    getService(Ci.nsIObserverService).
-    addObserver(observer, CAPTIVE_PORTAL_STATUS, false);
+  let mailWindow =  Cc["@mozilla.org/appshell/window-mediator;1"].
+                      getService(Ci.nsIWindowMediator).
+                      getMostRecentWindow(MAIL_3PANE);
 
-  test.assert(!ioService.offline);
+  var networkStatusObserver = {
+    observe: function networkStatusObserver_observe(aSubject, aTopic, aData) {
+      switch (aTopic) {
+        case NETWORK_STATUS_CHANGED:
+          switch (aData) {
+            case NETWORK_STATUS_ONLINE:
+              break;
+            case NETWORK_STATUS_OFFLINE:
+              // Simply bounces the offline status back into online
+              offlineManager.goOnline(false /* send unsent messages*/,
+                                      false /* play back offline IMAP operations */,
+                                      msgWindow);
+              break;
+          }
+          break;
+      }
+    }
+  };
+  obService.add(NETWORK_STATUS_CHANGED, networkStatusObserver);
 
-  // XXX this isn't working but is unneeded because we can test without it
-  //// Trigger offline event
-  //offlineManager.synchronizeForOffline(false, /* download news messages */
-  //                                     false, /* download mail messages */
-  //                                     false, /* send unsent messages */
-  //                                     true,  /* work offline */
-  //                                     msgWindow);
-  //
-  //test.assert(ioService.offline);
+  var captivePortalObserver = {
+    observe: function networkStatusObserver_observe(aSubject, aTopic, aData) {
+      switch (aTopic) {
+        case CAPTIVE_PORTAL_STATUS:
+          switch (aData) {
+            case CAPTIVE_PORTAL_ACTIVE:
+              // we have to manually close the tab because it did it's job by
+              // not closing when not on the original URL
+              let tabmail = mailWindow.document.getElementById('tabmail');
+              tabmail.closeOtherTabs(tabmail.tabInfo[0]);
+              redirects++;
+              nextTest();
+              break;
+            case CAPTIVE_PORTAL_INACTIVE:
+              // This should only be happening on the first time
+              test.assert(redirects == 0);
+              nextTest();
+              break;
+          }
+          break;
+        }
+    }
+  };
+  obService.add(CAPTIVE_PORTAL_STATUS, captivePortalObserver);
 
-  // Create an online event even though we know we are already online
-  offlineManager.goOnline(false /* send unsent messages*/,
-                          false /* play back offline IMAP operations */,
-                          msgWindow);
+  let triggerNetwork = function() {
+    offlineManager.synchronizeForOffline(false /* download news */,
+                                         false /* download mail */,
+                                         false /* send unsent message */,
+                                         true /* go offline when done */,
+                                         msgWindow);
+  }
 
-  // We are still online
-  test.assert(!ioService.offline);
+  let testSteps = [
+    function() {
+      prefs.set(URL_PREF, DEBUG_301_REDIRECT_URL);
+      test.assert(!ioService.offline);
+      triggerNetwork();
+    },
+    function() {
+      prefs.set(URL_PREF, DEBUG_META_REDIRECT_URL);
+      test.assert(!ioService.offline);
+      triggerNetwork();
+    },
+    function() {
+      prefs.set(URL_PREF, DEBUG_JS_REDIRECT_URL);
+      test.assert(!ioService.offline);
+      triggerNetwork();
+    },
+    function() {
+      // Cleanup function that's called after the last detection
+      obService.remove(CAPTIVE_PORTAL_STATUS, captivePortalObserver);
+      obService.remove(NETWORK_STATUS_CHANGED, networkStatusObserver);
+
+      // redirects should equal the number of functions above
+      test.assert(redirects == 3,
+                  "The number of redirects doesn't match the number of tests");
+      test.done();
+    }
+  ];
+
+  let nextTest = function() {
+    let func = testSteps.shift();
+    if (func) {
+      func();
+    } else {
+    }
+  }
+
+  // Set the initial pref to the regular URL
+  prefs.set(URL_PREF, URL);
+
+  // Triggers the first detection which should be inactive
+  require("main").main();
 
 }

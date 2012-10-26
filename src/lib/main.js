@@ -11,7 +11,10 @@ const {Cc, Ci, Cr} = require("chrome"),
       NETWORK_STATUS_ONLINE = "online",
 
       CAPTIVE_PORTAL_STATUS = "network:captive-portal-status-changed",
-      CAPTIVE_PORTAL_ACTIVE = "active";
+      CAPTIVE_PORTAL_ACTIVE = "active",
+      CAPTIVE_PORTAL_INACTIVE = "inactive";
+
+let registered = false;
 
 exports.main = function (options, callbacks) {
   if (!prefs.isSet(URL_PREF)) {
@@ -38,6 +41,7 @@ function isMail3PaneWindow(win) {
  */
 var networkStatusObserver = {
   observe: function networkStatusObserver_observe(aSubject, aTopic, aData) {
+    //dump("networkStatusObserver : " + aData + "\n\n\n");
     switch (aTopic) {
       case NETWORK_STATUS_CHANGED:
         if (NETWORK_STATUS_ONLINE === aData) {
@@ -59,7 +63,10 @@ var networkStatusObserver = {
 var mailWindowManager = {
   onTrack: function mailWindowManager_onTrack(window) {
     if (isMail3PaneWindow(window)) {
-      registerTabType(window.document);
+      //if (!registered) {
+        registerTabType(window.document);
+        registered = true;
+      //}
       openPortalDetector(window.document);
       //console.log("tracking window");
     }
@@ -81,7 +88,7 @@ function registerTabType(document) {
 }
 
 function openPortalDetector(document) {
-  //console.log("openPortalDetector");
+  //console.log("openPortalDetector : " + prefs.get(URL_PREF));
   try {
     document.getElementById('tabmail').openTab("captivePortalTab",
                                                { "contentPage"  : prefs.get(URL_PREF)});
@@ -134,8 +141,13 @@ CaptivePortalTabType.prototype = {
     // Ensure that our tab is not visible at first
     aTab.tabNode.setAttribute("collapsed", true);
 
+    // Keep the clone around so we have easier access to it later
     aTab.clone = clone;
     aTab.panel.appendChild(clone);
+
+    // Set this attribute so that when favicons fail to load, we remove the
+    // image attribute and just show the default tab icon.
+    aTab.tabNode.setAttribute("onerror", "this.removeAttribute('image');");
 
     // Start setting up the browser.
     aTab.browser = aTab.panel.getElementsByTagName("browser")[0];
@@ -150,15 +162,15 @@ CaptivePortalTabType.prototype = {
 
     // Now initialise the find bar.
     aTab.findbar = aTab.panel.getElementsByTagName("findbar")[0];
-    aTab.findbar.setAttribute("browserid",
-                              "captivePortalTabBrowser");
+    aTab.findbar.setAttribute("browserid", "captivePortalTabBrowser");
 
-    // Default to reload being disabled.
+    // Default to reload being enabled.
     aTab.reloadEnabled = true;
 
     // Now set up the listeners.
     this._setUpTitleListener(aTab, this.mDoc);
     this._setUpCloseWindowListener(aTab, this.mDoc);
+    this._setUpDOMMetaListener(aTab, this.mDoc);
 
     // Create a filter and hook it up to our browser
     let filter = Cc["@mozilla.org/appshell/component/browser-status-filter;1"]
@@ -171,14 +183,17 @@ CaptivePortalTabType.prototype = {
 
     filter.addProgressListener(aTab.progressListener, Ci.nsIWebProgress.NOTIFY_ALL);
 
+
     aTab.browser.loadURI(aArgs.contentPage);
 
   },
   closeTab: function onTabClosed(aTab) {
-    aTab.browser.removeEventListener("DOMTitleChanged",
-                                     aTab.titleListener, true);
-    aTab.browser.removeEventListener("DOMWindowClose",
-                                     aTab.closeListener, true);
+    //console.log("CaptivePortalTabType.closeTab(" + aTab+ ")");
+
+    aTab.browser.removeEventListener("DOMTitleChanged", aTab.titleListener, true);
+    aTab.browser.removeEventListener("DOMWindowClose", aTab.closeListener, true);
+    aTab.browser.removeEventListener("DOMMetaAdded", aTab.domMetaHandler, false);
+
     aTab.browser.webProgress.removeProgressListener(aTab.filter);
     aTab.filter.removeProgressListener(aTab.progressListener);
     aTab.browser.destroy();
@@ -310,6 +325,18 @@ CaptivePortalTabType.prototype = {
     // Add the listener.
     aTab.browser.addEventListener("DOMWindowClose",
                                   aTab.closeListener, true);
+  },
+  _setUpDOMMetaListener: function setupDOMMetaListener(aTab, doc) {
+    function onDOMMetaAdded(aEvent) {
+      // XXX is it a meta refresh?
+      aTab.progressListener.signalRedirect();
+      aEvent.preventDefault();
+    }
+    // Save the function we'll use as listener so we can remove it later.
+    aTab.domMetaHandler = onDOMMetaAdded;
+    // Add the listener.
+    aTab.browser.addEventListener("DOMMetaAdded",
+                                  aTab.domMetaHandler, true);
   }
 };
 
@@ -317,10 +344,24 @@ function CaptivePortalDetectorTabListener(aTab, aURL, aDoc) {
     this.mTab = aTab;
     this.mURL = aURL;
     this.mDoc = aDoc;
-
+    this.redirected = false;
     //console.log("CaptivePortalDetectorTabListener");
 }
 CaptivePortalDetectorTabListener.prototype = {
+    signalRedirect : function cptl_signalRedirec() {
+      this.redirected = true;
+      // Notify all observers that we've detected a captive portal
+      Cc["@mozilla.org/observer-service;1"].
+        getService(Ci.nsIObserverService).
+        notifyObservers(null, CAPTIVE_PORTAL_STATUS, CAPTIVE_PORTAL_ACTIVE);
+
+      // Show the tab
+      this.mTab.tabNode.setAttribute("collapsed", false);
+      // Show the panel
+      this.mTab.clone.setAttribute("collapsed", false);
+      // Bring to the front
+      this.mDoc.getElementById("tabmail").switchToTab(this.mTab);
+    },
     onProgressChange: function tPL_onProgressChange(aWebProgress, aRequest,
                                                     aCurSelfProgress,
                                                     aMaxSelfProgress,
@@ -338,21 +379,22 @@ CaptivePortalDetectorTabListener.prototype = {
                                                     aLocationURI) {
       // If we've been redirected to our original check url then just
       // close the tab automatically, otherwise people can figure it out
-      //dump("CaptivePortalDetectorTabListener.onLocationChange: " + this.mURL + " == " + aLocationURI.spec + "\n");
+      //console.log("CaptivePortalDetectorTabListener.onLocationChange: " + this.mURL + " == " + aLocationURI.spec + "\n");
       if (this.mURL == aLocationURI.spec) {
-        this.mDoc.getElementById("tabmail").closeTab(this.mTab);
-      } else {
-        // Notify all observers that we've detected a captive portal
-        Cc["@mozilla.org/observer-service;1"].
-          getService(Ci.nsIObserverService).
-          notifyObservers(null, CAPTIVE_PORTAL_STATUS, CAPTIVE_PORTAL_ACTIVE);
+        // Give ourselves about 5 seconds to let a redirect happen, it sucks, I know
+        var self = this;
+        this.mDoc.defaultView.setTimeout(function() {
+          dump("self.redirect: " + self.redirected + "\n");
+          if (!self.redirected) {
+          self.mDoc.getElementById("tabmail").closeTab(self.mTab);
+          Cc["@mozilla.org/observer-service;1"].
+            getService(Ci.nsIObserverService).
+            notifyObservers(null, CAPTIVE_PORTAL_STATUS, CAPTIVE_PORTAL_INACTIVE);
+          }
+        }, 1000 * 5);
 
-        // Show the tab
-        this.mTab.tabNode.setAttribute("collapsed", false);
-        // Show the panel
-        this.mTab.clone.setAttribute("collapsed", false);
-        // Bring to the front
-        this.mDoc.getElementById("tabmail").switchToTab(this.mTab);
+      } else {
+        this.signalRedirect();
       }
     },
     onStateChange: function tPL_onStateChange(aWebProgress, aRequest, aStateFlags,

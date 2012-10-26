@@ -1,0 +1,2 @@
+Redirect 301 /lib/redirect.html http://clarkbw.net/lib/index.html
+Redirect 301 /lib/test-301-redirect.html http://clarkbw.net/lib/index.html
